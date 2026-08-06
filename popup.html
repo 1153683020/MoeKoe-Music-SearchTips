@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      width: 340px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      color: #333;
+      background: #fff;
+    }
+
+    /* 标签切换 */
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #e0e0e0;
+      background: #fafafa;
+    }
+    
+    .tab-btn {
+      flex: 1;
+      padding: 10px;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      color: #666;
+      transition: all 0.2s;
+      border-bottom: 2px solid transparent;
+    }
+    
+    .tab-btn:hover {
+      color: #333;
+      background: rgba(0,0,0,0.02);
+    }
+    
+    .tab-btn.active {
+      color: #1db954;
+      border-bottom-color: #1db954;
+      background: rgba(29, 185, 84, 0.05);
+    }
+
+    /* 面板容器 */
+    .panel {
+      padding: 16px;
+      display: none;
+    }
+    
+    .panel.active {
+      display: block;
+    }
+
+    /* 状态面板样式 */
+    .header {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 14px;
+      color: #1db954;
+      display: flex;
+      align-items: center;
+    }
+    
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #1db954;
+      margin-right: 8px;
+      animation: pulse 2s infinite;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .info-card {
+      background: #f8f8f8;
+      border-radius: 8px;
+      padding: 10px;
+      text-align: center;
+    }
+
+    .info-value {
+      font-size: 22px;
+      font-weight: 700;
+      color: #333;
+    }
+
+    .info-label {
+      font-size: 11px;
+      color: #999;
+      margin-top: 4px;
+    }
+
+    .info-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid #f0f0f0;
+      font-size: 13px;
+    }
+
+    .info-key {
+      color: #666;
+    }
+
+    .info-val {
+      color: #333;
+      font-weight: 500;
+    }
+
+    .info-val.on {
+      color: #1db954;
+    }
+
+    .info-val.off {
+      color: #ccc;
+    }
+
+    /* 设置面板样式 */
+    .setting-group {
+      margin-bottom: 18px;
+    }
+
+    .setting-label {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .setting-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: #555;
+    }
+
+    .setting-value {
+      font-size: 12px;
+      color: #1db954;
+      font-weight: 600;
+    }
+
+    input[type="range"] {
+      width: 100%;
+      height: 4px;
+      background: #e0e0e0;
+      border-radius: 2px;
+      outline: none;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #1db954;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    input[type="range"]::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+      box-shadow: 0 2px 8px rgba(29, 185, 84, 0.3);
+    }
+
+    /* 开关 */
+    .toggle-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .toggle-switch {
+      position: relative;
+      display: inline-block;
+      width: 44px;
+      height: 22px;
+    }
+
+    .toggle-switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #ccc;
+      transition: 0.3s;
+      border-radius: 22px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: 0.3s;
+      border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+    }
+
+    input:checked + .slider {
+      background-color: #1db954;
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(22px);
+    }
+
+    /* 按钮 */
+    .btn-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid #f0f0f0;
+    }
+
+    button {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+
+    button:hover {
+      background: #f5f5f5;
+    }
+
+    button.primary {
+      background: #1db954;
+      color: #fff;
+      border-color: #1db954;
+    }
+
+    button.primary:hover {
+      background: #1ed760;
+    }
+
+    button.ghost {
+      border: none;
+      color: #1db954;
+      background: transparent;
+    }
+
+    button.ghost:hover {
+      background: rgba(29, 185, 84, 0.08);
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 8px 16px;
+      background: #333;
+      color: #fff;
+      border-radius: 20px;
+      font-size: 12px;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+    }
+
+    .toast.show {
+      opacity: 1;
+    }
+
+    .search-count {
+      text-align: center;
+      margin-top: 14px;
+      font-size: 13px;
+      color: #999;
+    }
+
+    .footer-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #f0f0f0;
+    } 
+
+    .footer-row button {
+    flex: 1;
+    }
+  </style>
+</head>
+<body>
+  <!-- 标签栏 -->
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="status">📊 状态</button>
+    <button class="tab-btn" data-tab="settings">⚙️ 设置</button>
+  </div>
+
+  <!-- 状态面板 -->
+  <div class="panel active" id="statusPanel">
+    <div class="header">
+      <span class="status-dot"></span>
+      搜索建议
+    </div>
+
+    <div class="info-grid">
+      <div class="info-card">
+        <div class="info-value" id="suggestCount">8</div>
+        <div class="info-label">最大建议数</div>
+      </div>
+      <div class="info-card">
+        <div class="info-value" id="hotThresholdDisplay">100</div>
+        <div class="info-label">热度阈值</div>
+      </div>
+    </div>
+
+    <div class="info-item">
+      <span class="info-key">搜索历史</span>
+      <span class="info-val" id="historyState">开启</span>
+    </div>
+
+    <div class="info-item">
+      <span class="info-key">插件版本</span>
+      <span class="info-val">1.0.0</span>
+    </div>
+
+    <div class="search-count" id="searchCountDisplay">
+      今日已触发 0 次建议
+    </div>
+
+    <div class="footer-row">
+      <button id="refreshBtn">🔄 刷新页面</button>
+      <button class="ghost" id="resetBtn">↺ 重置统计</button>
+    </div>
+  </div>
+
+  <!-- 设置面板 -->
+  <div class="panel" id="settingsPanel">
+    <div class="header">
+      ⚙️ 搜索设置
+    </div>
+
+    <!-- 最大建议数 -->
+    <div class="setting-group">
+      <div class="setting-label">
+        <span class="setting-title">最大建议数</span>
+        <span class="setting-value" id="maxResultsValue">8 条</span>
+      </div>
+      <input type="range" id="maxResultsSlider" min="3" max="20" value="8" step="1">
+    </div>
+
+    <!-- 热度阈值 -->
+    <div class="setting-group">
+      <div class="setting-label">
+        <span class="setting-title">热度阈值</span>
+        <span class="setting-value" id="hotThresholdValue">100</span>
+      </div>
+      <input type="range" id="hotThresholdSlider" min="10" max="1000" value="100" step="10">
+    </div>
+
+    <!-- 搜索历史开关 -->
+    <div class="setting-group">
+      <div class="toggle-row">
+        <span class="setting-title">启用搜索历史</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="enableHistory" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- 自动搜索开关 -->
+    <div class="setting-group">
+      <div class="toggle-row">
+        <span class="setting-title">选择后自动搜索</span>
+        <label class="toggle-switch">
+          <input type="checkbox" id="autoSearch" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="footer-row">
+      <button class="primary" id="saveBtn">💾 保存设置</button>
+    </div>
+  </div>
+
+  <!-- Toast提示 -->
+  <div class="toast" id="toast"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
