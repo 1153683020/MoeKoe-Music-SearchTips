@@ -1,6 +1,49 @@
-// content.js - 多层配置同步（中继 iframe + 消息推送 + URL hash）+ 搜索建议
+// content.js - chrome.storage 直连（get + onChanged 实时同步）+ 搜索建议
 (function() {
   'use strict';
+
+  const STORAGE_KEY = 'search-suggest-config';
+  const LEGACY_KEYS = ['search_maxResults', 'search_hotThreshold', 'search_enableHistory', 'search_autoSearch'];
+  const DEFAULTS = {
+    maxResults: 10,
+    hotThreshold: 100,
+    enableHistory: true,
+    autoSearch: true
+  };
+
+  // 读取配置（单对象键，缺失字段用默认值补齐；兼容迁移旧版多键格式）
+  function readConfig(callback) {
+    try {
+      chrome.storage.local.get([STORAGE_KEY, ...LEGACY_KEYS], (res) => {
+        if (chrome.runtime.lastError) {
+          console.warn('[搜索建议] 读取配置失败:', chrome.runtime.lastError.message);
+          callback({ ...DEFAULTS });
+          return;
+        }
+        let config = res[STORAGE_KEY];
+        if (!config) {
+          const legacy = {};
+          if (typeof res.search_maxResults === 'number') legacy.maxResults = res.search_maxResults;
+          if (typeof res.search_hotThreshold === 'number') legacy.hotThreshold = res.search_hotThreshold;
+          if (typeof res.search_enableHistory === 'boolean') legacy.enableHistory = res.search_enableHistory;
+          if (typeof res.search_autoSearch === 'boolean') legacy.autoSearch = res.search_autoSearch;
+          config = { ...DEFAULTS, ...legacy };
+          chrome.storage.local.set({ [STORAGE_KEY]: config }, () => {
+            if (Object.keys(legacy).length) {
+              chrome.storage.local.remove(LEGACY_KEYS, () => {});
+              console.log('[搜索建议] 旧版多键配置已迁移');
+            }
+          });
+        } else {
+          config = { ...DEFAULTS, ...config };
+        }
+        callback(config);
+      });
+    } catch (e) {
+      console.warn('[搜索建议] 读取配置异常:', e);
+      callback({ ...DEFAULTS });
+    }
+  }
 
   class SearchSuggest {
     constructor() {
@@ -9,44 +52,28 @@
       this.highlightedIndex = -1;
       this.items = [];
       this.input = null;
-      this.config = {
-        maxResults: 10,
-        hotThreshold: 100,
-        enableHistory: true,
-        autoSearch: true
-      };
-      this.loadConfig();
-      this.listenForConfigUpdates();
-      // 通道 0：若 content 环境允许 chrome.storage，直接监听（最优通道）
-      this.tryDirectStorage();
-      // 通道 1：中继 iframe（扩展上下文 + postMessage，绕开受限的扩展消息 API）
-      this.injectRelay();
+      this.config = { ...DEFAULTS };
+      this.initConfig();
     }
 
-    // 从页面 localStorage 读取配置，带延迟重试
-    loadConfig() {
-      const read = () => {
-        try {
-          const maxResults = parseInt(localStorage.getItem('search_maxResults'));
-          const hotThreshold = parseInt(localStorage.getItem('search_hotThreshold'));
-          if (!isNaN(maxResults) && maxResults > 0) this.config.maxResults = maxResults;
-          if (!isNaN(hotThreshold) && hotThreshold > 0) this.config.hotThreshold = hotThreshold;
-          if (localStorage.getItem('search_enableHistory') !== null) {
-            this.config.enableHistory = localStorage.getItem('search_enableHistory') === 'true';
+    initConfig() {
+      const self = this;
+      // 启动时读取一次
+      readConfig((config) => self.applyConfig(config));
+      // 监听变化：popup 保存后实时生效
+      try {
+        chrome.storage.onChanged.addListener((changes, area) => {
+          if (area === 'local' && changes[STORAGE_KEY]) {
+            const stored = changes[STORAGE_KEY].newValue || {};
+            console.log('[搜索建议] 检测到配置变化');
+            self.applyConfig({ ...DEFAULTS, ...stored });
           }
-          if (localStorage.getItem('search_autoSearch') !== null) {
-            this.config.autoSearch = localStorage.getItem('search_autoSearch') !== 'false';
-          }
-          console.log('[搜索建议] 配置加载完成:', this.config);
-        } catch (e) {
-          console.warn('[搜索建议] loadConfig 异常:', e);
-        }
-      };
-      read();
-      setTimeout(read, 200);
+        });
+      } catch (e) {
+        console.warn('[搜索建议] chrome.storage 不可用:', e.message);
+      }
     }
 
-    // 统一应用配置：更新内存 + 写回页面 localStorage（保证重启后保留）
     applyConfig(value) {
       if (!value || typeof value !== 'object') return;
       let changed = false;
@@ -67,114 +94,8 @@
         changed = true;
       }
       if (changed) {
-        this.writePageStorage();
         console.log('[搜索建议] 配置已更新:', this.config);
       }
-    }
-
-    writePageStorage() {
-      try {
-        localStorage.setItem('search_maxResults', String(this.config.maxResults));
-        localStorage.setItem('search_hotThreshold', String(this.config.hotThreshold));
-        localStorage.setItem('search_enableHistory', this.config.enableHistory ? 'true' : 'false');
-        localStorage.setItem('search_autoSearch', this.config.autoSearch ? 'true' : 'false');
-      } catch (e) {
-        console.warn('[搜索建议] 写入 localStorage 失败:', e);
-      }
-    }
-
-    // 监听各类配置更新事件（多层同步通道）
-    listenForConfigUpdates() {
-      const self = this;
-
-      // 通道 A：Background 转发的消息（popup 保存后触发）
-      chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        if (message.type === 'CONFIG_UPDATED') {
-          console.log('[搜索建议] 收到推送配置:', message.value);
-          self.applyConfig(message.value);
-          sendResponse({ success: true });
-          return true;
-        }
-      });
-
-      // 通道 B：URL hash 变化（popup 通过 tabs.update 携带配置，终极兜底）
-      window.addEventListener('hashchange', () => {
-        try {
-          if (location.hash.indexOf('__moekoe_cfg=') === -1) return;
-          const params = new URLSearchParams(location.hash.slice(1));
-          const raw = params.get('__moekoe_cfg');
-          if (!raw) return;
-          console.log('[搜索建议] 检测到 hash 配置');
-          self.applyConfig(JSON.parse(raw));
-        } catch (e) {
-          console.warn('[搜索建议] hash 配置解析失败:', e);
-        }
-      });
-
-      // 通道 C：页面自定义事件（可由页面环境或调试工具触发）
-      window.addEventListener('config-updated', () => {
-        console.log('[搜索建议] 检测到页面事件，重新加载配置');
-        self.loadConfig();
-      });
-
-      // 通道 D：relay iframe 的 postMessage 配置推送
-      self.listenForRelayMessages();
-    }
-
-    // 尝试在 content 环境直接使用 chrome.storage（特性检测，失败则静默降级）
-    tryDirectStorage() {
-      try {
-        if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.local) return;
-        const self = this;
-        chrome.storage.local.get(['maxResults', 'hotThreshold', 'enableHistory', 'autoSearch'], (res) => {
-          if (chrome.runtime.lastError) return;
-          if (res) self.applyConfig(res);
-        });
-        chrome.storage.onChanged.addListener((changes, namespace) => {
-          if (namespace !== 'local') return;
-          const patch = {};
-          for (const k in changes) patch[k] = changes[k].newValue;
-          self.applyConfig(patch);
-        });
-        console.log('[搜索建议] chrome.storage 直连通道已启用');
-      } catch (e) {
-        console.warn('[搜索建议] chrome.storage 不可用，降级到其他通道:', e.message);
-      }
-    }
-
-    // 注入中继 iframe：扩展页面上下文（chrome.storage 可用）+ postMessage（DOM 机制必通）
-    injectRelay() {
-      try {
-        if (typeof chrome === 'undefined' || !chrome.runtime ||
-            typeof chrome.runtime.getURL !== 'function') return;
-        if (this.relayFrame && document.contains(this.relayFrame)) return;
-        const url = chrome.runtime.getURL('relay.html');
-        const frame = document.createElement('iframe');
-        frame.src = url;
-        frame.style.cssText = 'display:none;width:0;height:0;border:0;';
-        const self = this;
-        frame.addEventListener('load', () => {
-          self.relayReady = true;
-          console.log('[搜索建议] relay 中继已就绪');
-        });
-        (document.body || document.documentElement).appendChild(frame);
-        this.relayFrame = frame;
-        console.log('[搜索建议] relay 中继已注入');
-      } catch (e) {
-        console.warn('[搜索建议] relay 注入失败:', e);
-      }
-    }
-
-    // 监听中继 iframe 的 postMessage 配置推送
-    listenForRelayMessages() {
-      const self = this;
-      window.addEventListener('message', (e) => {
-        if (!self.relayFrame || e.source !== self.relayFrame.contentWindow) return;
-        if (e.data && e.data.type === 'MOEKOE_SEARCH_CONFIG') {
-          console.log('[搜索建议] 收到 relay 配置:', e.data.value);
-          self.applyConfig(e.data.value);
-        }
-      });
     }
 
     // ---------- UI 相关方法 ----------
@@ -346,9 +267,6 @@
         return;
       }
       debounceTimer = setTimeout(async () => {
-        // 搜索前从 localStorage 重载配置（兜底）
-        suggest.loadConfig();
-
         const raw = await fetchSuggestions(keyword);
         const filtered = raw
           .filter(item => (item.hot || 0) >= suggest.config.hotThreshold)
@@ -388,7 +306,6 @@
     const observer = new MutationObserver(() => {
       const input = findSearchInput();
       if (input && !input.hasAttribute('data-suggest-bound')) attachSearchListener();
-      if (suggest.relayFrame && !document.contains(suggest.relayFrame)) suggest.injectRelay();
     });
     observer.observe(document.body, { childList: true, subtree: true });
   }

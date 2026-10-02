@@ -24,13 +24,11 @@
 
 - 基于 Chrome Extension Manifest V3 开发。
 - 采用纯前端 `fetch` 方式调用搜索建议接口。
-- 配置同步采用多层机制（按可靠性排序）：
-  1. **中继 iframe**（主通道）：content script 注入插件自身的隐藏 iframe（扩展页面上下文，`chrome.storage` 完整可用），通过 `chrome.storage` 轮询/监听 + `postMessage`（纯 DOM 机制）实时同步配置，完全绕开受限的扩展消息 API；
-  2. **chrome.storage 直连**：若 content 环境未禁用 `chrome.storage` 则特性检测自动启用；
-  3. `chrome.tabs.sendMessage` 直接推送 + Background 中转；
-  4. URL hash 兜底 + 页面 `localStorage` 持久化。
-- 所有 `chrome.tabs.sendMessage` / `chrome.runtime.sendMessage` 调用统一使用回调风格，避免在 Electron 环境下因 Promise 支持不完整导致中断。
-- v1.2.1 起 content script 不再向 Background 轮询拉取配置：真实环境实测发现 MoeKoe 的 Background 中 `storage.onChanged` 不触发，内存缓存会停留在启动时的旧值，轮询会与中继通道互相覆盖造成配置振荡，故移除该通道。
+- 配置存储与同步采用 `chrome.storage` 直连（经 MoeKoe Music 开发者确认，content script 中 `chrome.storage` 可用，需声明 `storage` 权限）：
+  - popup 与 content 使用统一的对象键 `search-suggest-config`，缺失字段自动用默认值补齐；
+  - popup 保存后，content 通过 `chrome.storage.onChanged` **实时生效，无需刷新页面**；
+  - 自动兼容迁移 v1.2.1 及更早版本的多键配置格式。
+- 不使用 URL hash 传递配置：萌音为 hash 路由模式，会影响 Vue 路由与页面渲染（开发者审查意见）。
 
 ## 📦 安装
 
@@ -52,13 +50,11 @@ AZLight
 
 ## 📄 版本
 
-1.2.1
+1.3.0
 
 ## 📝 备注
 
-v1.2.1 修复配置振荡问题：真实环境实测发现 MoeKoe 的 Background service worker 中 `storage.onChanged` 不触发，`GET_CONFIG` 轮询会拿到停留在启动时旧值的内存缓存，与中继通道的新鲜配置互相覆盖（表现为配置在两个值之间每秒振荡）。已移除 content 侧轮询，并让 Background 在 `SAVE_CONFIG` 时直接刷新内存缓存。
-
-v1.2.0 在真实 MoeKoe Music 环境实测中发现：所有扩展消息通道（`tabs.sendMessage` 推送、`runtime.sendMessage` 拉取、hash 同步）均不可达，但 popup 的 `chrome.storage` 与 content 的 `localStorage` 读取可靠。据此新增**中继 iframe** 机制：content script 注入插件自身的隐藏 iframe（扩展上下文），通过 `chrome.storage` + `postMessage`（纯 DOM 机制）实时同步配置，保存后通常在 1 秒内自动生效，无需手动刷新。
+v1.3.0 按 MoeKoe Music 开发者审查意见重构：确认 `chrome.storage` 在 content script 中可用，简化为 `chrome.storage` 直连（`get` + `onChanged` 实时同步），移除 URL hash 通道（避免破坏萌音的 hash 路由）、中继 iframe、Background 中转与页面 `localStorage` 镜像，配置保存后实时生效，无需手动刷新。
 
 ---
 
@@ -226,6 +222,35 @@ v1.2.0 在真实环境确认 relay 通道工作正常（配置送达并应用）
 
 修复后所有通道均只传递新鲜配置，无振荡来源。
 
+---
+
+### 12. v1.3.0 修改：按开发者审查意见重构（2026-10）
+
+MoeKoe Music 软件开发者审查插件代码后给出两点意见：
+
+1. **`chrome.storage` 在 content script 中是可用的**（只要 `manifest.json` 正确声明 `storage` 权限），并提供了参考实现（[moekoe-blue_archive-theme 的 config-helper](https://github.com/LateDreamXD/moekoe-blue_archive-theme/blob/c76a267d6041e9d2fd654d73834ea4f9ef725e27/src/shared/config-helper.ts)）：popup/content 直接 `chrome.storage.local.get/set`，content 侧 `chrome.storage.onChanged` 监听变化。
+2. **不推荐用 URL hash 进行事件传递与监听**：萌音使用 hash 路由模式，hash 传参很大程度上会破坏 Vue 路由器的路由与页面渲染内容。
+
+#### 据此实施的重构
+
+| 变更 | 说明 |
+|------|------|
+| **简化为 `chrome.storage` 直连** | popup 与 content 使用统一对象键 `search-suggest-config`，缺失字段用默认值补齐（参考开发者的 merge 模式）；content 侧 `onChanged` 监听，保存后实时生效 |
+| **移除 URL hash 通道** | 避免破坏萌音的 Vue hash 路由 |
+| **移除中继 iframe（relay.html/relay.js）** | `chrome.storage` 直连可用后该 workaround 不再需要 |
+| **移除 Background（background.js）** | 无中转需求，插件不再声明 background |
+| **移除页面 `localStorage` 镜像** | `chrome.storage` 本身即持久化，镜像冗余 |
+| **新增旧配置迁移** | 自动将 v1.2.1 及更早版本的多键格式（`search_maxResults` 等）迁移为单对象键，升级不丢配置 |
+| **精简权限** | 移除未使用的 `scripting` 权限，保留 `storage`（配置同步）与 `tabs`（刷新按钮） |
+
+#### 当前同步架构
+
+```
+popup 保存
+  └─ chrome.storage.local.set({ 'search-suggest-config': config })
+       └─ content script: chrome.storage.onChanged → 实时应用（无需刷新）
+启动时
+  └─ content/popup: chrome.storage.local.get → 默认值补齐 → 应用（旧格式自动迁移）
+```
+
 **Enjoy your searching!** 🔍
-
-

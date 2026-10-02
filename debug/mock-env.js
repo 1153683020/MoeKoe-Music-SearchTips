@@ -101,6 +101,20 @@
         if (cb) setTimeout(cb, 0);
       },
 
+      storageRemove: function(keys, cb) {
+        var changes = {};
+        var list = Array.isArray(keys) ? keys : [keys];
+        list.forEach(function(k) {
+          if (k in storageData) {
+            changes[k] = { oldValue: storageData[k], newValue: undefined };
+            delete storageData[k];
+          }
+        });
+        log('[storage] remove ' + JSON.stringify(list));
+        fireStorageChanged(changes);
+        if (cb) setTimeout(cb, 0);
+      },
+
       resetStorage: function() {
         storageData = {};
         this.storageData = storageData;
@@ -180,7 +194,8 @@
     return {
       local: {
         get: function(keys, cb) { kernel.storageGet(keys, cb); },
-        set: function(obj, cb) { kernel.storageSet(obj, cb); }
+        set: function(obj, cb) { kernel.storageSet(obj, cb); },
+        remove: function(keys, cb) { kernel.storageRemove(keys, cb); }
       },
       onChanged: {
         addListener: function(fn) { kernel.addStorageListener(fn); }
@@ -198,15 +213,10 @@
   }
 
   if (role === 'page') {
-    // 模拟 MoeKoe 限制：content script 无 chrome.storage / chrome.tabs
+    // 模拟 MoeKoe 环境：chrome.storage 可用（开发者确认），消息 API 不可用
     window.chrome = {
-      runtime: Object.assign(makeLastErrorGetter(), {
-        getURL: function(p) { return 'relay-sim.html?role=relay'; },
-        sendMessage: function(msg, cb) { kernel.log('[page] runtime.sendMessage ' + (msg && msg.type)); kernel.dispatchToBackground(msg, cb); },
-        onMessage: {
-          addListener: function(fn) { kernel.addPageMessageHandler(fn); }
-        }
-      })
+      storage: makeStorage(),
+      runtime: Object.assign(makeLastErrorGetter(), {})
     };
     kernel.registerPageWindow(window);
   } else if (role === 'relay') {

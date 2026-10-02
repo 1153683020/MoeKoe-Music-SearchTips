@@ -5,6 +5,15 @@ console.log('[Popup] popup.js 文件已加载');
   'use strict';
 
   try {
+    const STORAGE_KEY = 'search-suggest-config';
+    const LEGACY_KEYS = ['search_maxResults', 'search_hotThreshold', 'search_enableHistory', 'search_autoSearch'];
+    const defaults = {
+      maxResults: 10,
+      hotThreshold: 100,
+      enableHistory: true,
+      autoSearch: true
+    };
+
     const tabBtns = document.querySelectorAll('.tab-btn');
     const panels = document.querySelectorAll('.panel');
     const toast = document.getElementById('toast');
@@ -24,15 +33,7 @@ console.log('[Popup] popup.js 文件已加载');
     const autoSearch = document.getElementById('autoSearch');
     const saveBtn = document.getElementById('saveBtn');
 
-    const defaults = {
-      maxResults: 10,
-      hotThreshold: 100,
-      enableHistory: true,
-      autoSearch: true,
-      searchCount: 0
-    };
-
-    let currentConfig = { ...defaults };
+    let currentConfig = { ...defaults, searchCount: 0 };
 
     function showToast(message, duration = 2000) {
       toast.textContent = message;
@@ -41,6 +42,35 @@ console.log('[Popup] popup.js 文件已加载');
       toast._timer = setTimeout(() => {
         toast.classList.remove('show');
       }, duration);
+    }
+
+    // 读取配置（与 content.js 相同的单对象键 + 旧版多键迁移）
+    function readConfig(callback) {
+      chrome.storage.local.get([STORAGE_KEY, 'searchCount', ...LEGACY_KEYS], function(res) {
+        if (chrome.runtime.lastError) {
+          console.warn('[Popup] 读取配置失败:', chrome.runtime.lastError.message);
+          callback({ ...defaults, searchCount: 0 });
+          return;
+        }
+        let cfg = res[STORAGE_KEY];
+        if (!cfg) {
+          cfg = { ...defaults };
+          let hasLegacy = false;
+          if (typeof res.search_maxResults === 'number') { cfg.maxResults = res.search_maxResults; hasLegacy = true; }
+          if (typeof res.search_hotThreshold === 'number') { cfg.hotThreshold = res.search_hotThreshold; hasLegacy = true; }
+          if (typeof res.search_enableHistory === 'boolean') { cfg.enableHistory = res.search_enableHistory; hasLegacy = true; }
+          if (typeof res.search_autoSearch === 'boolean') { cfg.autoSearch = res.search_autoSearch; hasLegacy = true; }
+          chrome.storage.local.set({ [STORAGE_KEY]: cfg }, function() {
+            if (hasLegacy) {
+              chrome.storage.local.remove(LEGACY_KEYS, function() {});
+              console.log('[Popup] 旧版多键配置已迁移');
+            }
+          });
+        } else {
+          cfg = { ...defaults, ...cfg };
+        }
+        callback({ ...cfg, searchCount: res.searchCount || 0 });
+      });
     }
 
     // 标签切换
@@ -62,9 +92,9 @@ console.log('[Popup] popup.js 文件已加载');
     });
 
     function loadConfig() {
-      chrome.storage.local.get(Object.keys(defaults), function(result) {
-        console.log('[Popup] 加载配置:', result);
-        currentConfig = { ...defaults, ...result };
+      readConfig(function(config) {
+        console.log('[Popup] 加载配置:', config);
+        currentConfig = config;
         updateStatusUI();
         syncSettingsToUI();
       });
@@ -96,53 +126,7 @@ console.log('[Popup] popup.js 文件已加载');
       hotThresholdValue.textContent = this.value;
     });
 
-    // 直接推送配置到当前页面的 content script（不经过 Background，减少不稳定环节）
-    function pushToActiveTab(config) {
-      try {
-        chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
-          if (!tabs || !tabs[0]) return;
-          try {
-            // 统一使用回调风格：Electron 的 tabs.sendMessage 可能不返回 Promise
-            chrome.tabs.sendMessage(tabs[0].id, {
-              type: 'CONFIG_UPDATED',
-              value: config
-            }, function() {
-              void chrome.runtime.lastError;
-            });
-            console.log('[Popup] 已直接推送配置到页面');
-          } catch (e) {
-            console.warn('[Popup] 直接推送失败:', e);
-          }
-        });
-      } catch (e) {
-        console.warn('[Popup] tabs API 不可用:', e);
-      }
-    }
-
-    // 通过 URL hash 携带配置（终极兜底：即使所有消息通道失效也能同步）
-    function syncViaHash(config) {
-      try {
-        chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
-          if (!tabs || !tabs[0] || !tabs[0].url) return;
-          try {
-            const url = new URL(tabs[0].url);
-            const params = new URLSearchParams(url.hash ? url.hash.slice(1) : '');
-            params.set('__moekoe_cfg', JSON.stringify(config));
-            url.hash = params.toString();
-            chrome.tabs.update(tabs[0].id, { url: url.toString() }, function() {
-              void chrome.runtime.lastError;
-            });
-            console.log('[Popup] 已通过 URL hash 同步配置');
-          } catch (e) {
-            console.warn('[Popup] hash 同步失败:', e);
-          }
-        });
-      } catch (e) {
-        console.warn('[Popup] tabs API 不可用:', e);
-      }
-    }
-
-    // 保存按钮：storage 持久化 + 直接推送 + Background 中转 + hash 兜底
+    // 保存按钮：写入 chrome.storage，content script 通过 onChanged 实时应用
     saveBtn.addEventListener('click', function() {
       const newConfig = {
         maxResults: parseInt(maxResultsSlider.value),
@@ -153,37 +137,17 @@ console.log('[Popup] popup.js 文件已加载');
 
       console.log('[Popup] 保存设置:', newConfig);
 
-      // 1. 持久化到扩展存储（Background 通过 onChanged 同步缓存）
-      chrome.storage.local.set(newConfig, function() {
-        console.log('[Popup] 配置已写入 chrome.storage');
+      chrome.storage.local.set({ [STORAGE_KEY]: newConfig }, function() {
+        console.log('[Popup] 配置已写入 chrome.storage，页面将实时应用');
       });
 
-      // 2. 直接推送到页面 content script
-      pushToActiveTab(newConfig);
-
-      // 3. 通知 Background 刷新缓存并中转（降级路径）
-      try {
-        chrome.runtime.sendMessage({
-          type: 'SAVE_CONFIG',
-          value: newConfig
-        }, function() {
-          void chrome.runtime.lastError;
-        });
-      } catch (e) {
-        console.warn('[Popup] 通知 Background 失败:', e);
-      }
-
-      // 4. hash 同步兜底
-      syncViaHash(newConfig);
-
-      // 更新当前 UI 状态
       currentConfig = { ...currentConfig, ...newConfig };
       updateStatusUI();
       syncSettingsToUI();
-      showToast('✅ 已保存，通常 1 秒内自动生效；如未生效请刷新页面');
+      showToast('✅ 已保存，实时生效');
     });
 
-    // 刷新页面按钮：强制重载页面使配置生效（兜底操作）
+    // 刷新页面按钮：手动兜底操作
     refreshBtn.addEventListener('click', function() {
       try {
         chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
@@ -228,20 +192,18 @@ console.log('[Popup] popup.js 文件已加载');
       });
     });
 
-    // 监听存储变化（外部修改）
+    // 监听存储变化（content 或其他来源修改时同步 popup UI）
     chrome.storage.onChanged.addListener(function(changes, namespace) {
-      if (namespace === 'local') {
-        let needUpdate = false;
-        for (let key in changes) {
-          if (key in defaults) {
-            currentConfig[key] = changes[key].newValue;
-            needUpdate = true;
-          }
-        }
-        if (needUpdate) {
-          updateStatusUI();
-          syncSettingsToUI();
-        }
+      if (namespace !== 'local') return;
+      if (changes[STORAGE_KEY]) {
+        const stored = changes[STORAGE_KEY].newValue || {};
+        currentConfig = { ...currentConfig, ...defaults, ...stored };
+        updateStatusUI();
+        syncSettingsToUI();
+      }
+      if (changes.searchCount) {
+        currentConfig.searchCount = changes.searchCount.newValue;
+        updateStatusUI();
       }
     });
 
