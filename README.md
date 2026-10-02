@@ -1,4 +1,4 @@
-# MoeKoe-Music搜索建议插件 (MoeKoe-Music-SearchTips) Powered by Deepseek
+# MoeKoe-Music搜索建议插件 (MoeKoe-Music-SearchTips) Powered by Deepseek && Repaired by GLM-5.3Flash
 
 ## 📖 简介
 
@@ -7,7 +7,7 @@
 ## ✨ 特性
 
 - **实时建议**：输入即显示，智能匹配热门搜索词。
-- **热度标识**：建议词附带热度指数，热门内容一目了然。计数单位采用 `K`/`M`/`B`（1K=1000、1M=100万、1B=10亿），保留一位小数并省略末尾 `.0`（如 `1K`、`99.5K`、`999.9M`）；不足 1000 直接显示原始数值，不会出现 `0.9M` 这类换算。
+- **热度标识**：建议词附带热度指数，热门内容一目了然。计数单位采用 `K`/`M`/`B`（1K=1000、1M=100万、1B=10亿），保留一位小数并省略末尾 `.0`（如 `1K`、`99.5K`、`999.9M`）；不足 1000 直接显示原始数值，不足1000000显示为999.9K，不会出现 `0.9M` 这类换算。
 - **键盘导航**：支持方向键上下选择，回车确认，操作流畅。
 - **点击即搜**：点击建议词即可自动填入搜索框并触发搜索。
 - **自定义数量**：支持在弹窗中自定义建议条数（3-20 条），保存后自动实时同步，无需手动刷新。
@@ -61,10 +61,6 @@ v1.2.1 修复配置振荡问题：真实环境实测发现 MoeKoe 的 Background
 v1.2.0 在真实 MoeKoe Music 环境实测中发现：所有扩展消息通道（`tabs.sendMessage` 推送、`runtime.sendMessage` 拉取、hash 同步）均不可达，但 popup 的 `chrome.storage` 与 content 的 `localStorage` 读取可靠。据此新增**中继 iframe** 机制：content script 注入插件自身的隐藏 iframe（扩展上下文），通过 `chrome.storage` + `postMessage`（纯 DOM 机制）实时同步配置，保存后通常在 1 秒内自动生效，无需手动刷新。
 
 ---
-
-**Enjoy your searching!** 🔍
-
-
 
 ## PS：搜索建议插件配置同步调试历程
 
@@ -229,3 +225,7 @@ v1.2.0 在真实环境确认 relay 通道工作正常（配置送达并应用）
 2. **Background 在 `SAVE_CONFIG` 时直接刷新内存缓存**：不再依赖 `storage.onChanged` 保持缓存新鲜，`GET_CONFIG` 端点保留供降级使用。
 
 修复后所有通道均只传递新鲜配置，无振荡来源。
+
+**Enjoy your searching!** 🔍
+
+
