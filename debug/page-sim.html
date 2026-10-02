@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>模拟 MoeKoe Music</title>
+  <style>
+    body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+    h3 { margin: 0 0 12px; color: #1db954; }
+    .search-bar { position: relative; margin-bottom: 16px; }
+    .search-bar input { width: 100%; padding: 10px 14px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; box-sizing: border-box; }
+    .hint { color: #999; font-size: 12px; }
+  </style>
+  <script src="mock-env.js"></script>
+  <script>
+    // 拦截对本地搜索接口的请求，返回模拟建议数据（20 条，热度递减 1000→430）
+    (function() {
+      var realFetch = window.fetch ? window.fetch.bind(window) : null;
+      var MOCK = [];
+      for (var i = 0; i < 20; i++) {
+        MOCK.push({ HintInfo: 'Mock歌曲' + (i + 1) + ' - Mock歌手' + ((i % 5) + 1), Hot: 1000 - i * 30 });
+      }
+      window.fetch = function(url, opts) {
+        if (String(url).indexOf('127.0.0.1:6521/search/suggest') !== -1) {
+          return Promise.resolve(new Response(
+            JSON.stringify({ data: [{ RecordDatas: MOCK }] }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          ));
+        }
+        return realFetch(url, opts);
+      };
+    })();
+  </script>
+</head>
+<body>
+  <h3>🎵 模拟 MoeKoe Music 页面</h3>
+  <div class="search-bar">
+    <input type="text" placeholder="搜索音乐..." id="mockSearchInput">
+  </div>
+  <p class="hint">在上方搜索框输入即可看到搜索建议（由 content.js 注入）</p>
+  <script src="../content.js"></script>
+</body>
+</html>

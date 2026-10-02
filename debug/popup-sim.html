@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Popup Sim</title>
+  <script src="mock-env.js"></script>
+</head>
+<body>
+<script>
+  // 动态载入真实的 popup.html（替换脚本路径），保证测试的是真实文件
+  (function() {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '../popup.html', false);
+    xhr.send();
+    var html = xhr.responseText.replace('<script src="popup.js">', '<script src="../popup.js">');
+    document.write(html);
+  })();
+</script>
+</body>
+</html>

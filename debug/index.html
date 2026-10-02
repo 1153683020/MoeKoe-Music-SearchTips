@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>MoeKoe-Music-SearchTips 调试台</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, "Segoe UI", sans-serif; margin: 0; padding: 16px; background: #1e1e1e; color: #ddd; }
+    h1 { font-size: 18px; margin: 0 0 12px; color: #1db954; }
+    .layout { display: flex; gap: 16px; }
+    .left { flex: 1.2; }
+    .right { flex: 1; min-width: 380px; }
+    h2 { font-size: 14px; margin: 0 0 8px; color: #aaa; }
+    iframe { background: #fff; border: 1px solid #444; border-radius: 6px; }
+    #pageFrame { width: 100%; height: 480px; }
+    #popupFrame { width: 360px; height: 500px; }
+    .btns { margin: 10px 0; display: flex; gap: 8px; }
+    .btns button { padding: 8px 14px; border: none; border-radius: 6px; background: #1db954; color: #fff; cursor: pointer; font-size: 13px; }
+    .btns button.secondary { background: #444; }
+    #log { background: #111; border: 1px solid #333; border-radius: 6px; padding: 10px; font-size: 12px; line-height: 1.7; height: 320px; overflow-y: auto; white-space: pre-wrap; margin: 0; }
+    .pass { color: #4caf50; }
+    .fail { color: #f44336; }
+  </style>
+  <script src="mock-env.js"></script>
+</head>
+<body>
+  <h1>MoeKoe-Music-SearchTips 调试台</h1>
+  <div class="layout">
+    <div class="left">
+      <h2>模拟 MoeKoe Music 页面（受限扩展环境）</h2>
+      <iframe id="pageFrame" src="page-sim.html?role=page"></iframe>
+    </div>
+    <div class="right">
+      <h2>插件 Popup（真实 popup.html + popup.js）</h2>
+      <iframe id="popupFrame" src="popup-sim.html?role=popup"></iframe>
+      <iframe id="bgFrame" src="background-sim.html?role=background" style="display:none;"></iframe>
+      <div class="btns">
+        <button id="runBtn">▶ 运行完整测试</button>
+        <button id="clearBtn" class="secondary">🧹 清空日志</button>
+      </div>
+      <pre id="log"></pre>
+    </div>
+  </div>
+
+  <script>
+    const pageFrame = document.getElementById('pageFrame');
+    const popupFrame = document.getElementById('popupFrame');
+    const bgFrame = document.getElementById('bgFrame');
+    const logEl = document.getElementById('log');
+    let lines = [];
+    let passCount = 0, failCount = 0;
+
+    function log(msg, cls) {
+      lines.push(msg);
+      logEl.textContent = lines.join('\n');
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function assert(cond, name) {
+      if (cond) { passCount++; log('  ✅ PASS: ' + name, 'pass'); }
+      else { failCount++; log('  ❌ FAIL: ' + name, 'fail'); }
+    }
+    function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+    function kernel() { return window.__moekoeKernel; }
+    function dumpChannelLogs() {
+      const k = kernel();
+      if (k && k.logs.length) k.logs.splice(0).forEach(m => log('      [通道] ' + m));
+    }
+
+    function reloadFrame(f) {
+      return new Promise(res => {
+        f.addEventListener('load', res, { once: true });
+        try { f.contentWindow.location.reload(); } catch (e) { res(); }
+      });
+    }
+
+    async function waitReady() {
+      for (let i = 0; i < 80; i++) {
+        const pd = pageFrame.contentDocument;
+        const pod = popupFrame.contentDocument;
+        const k = kernel();
+        const input = pd && pd.querySelector('input[type="text"]');
+        const bound = input && input.hasAttribute('data-suggest-bound');
+        const saveBtn = pod && pod.getElementById('saveBtn');
+        const counts = k && k.counts();
+        if (bound && saveBtn && counts && counts.bg >= 1 && counts.page >= 1) return true;
+        await sleep(100);
+      }
+      return false;
+    }
+
+    async function resetEnv() {
+      const k = kernel();
+      try { pageFrame.contentWindow.localStorage.clear(); } catch (e) {}
+      k.resetStorage();
+      await Promise.all([reloadFrame(pageFrame), reloadFrame(bgFrame)]);
+      await waitReady();
+    }
+
+    async function doSearch(kw) {
+      const win = pageFrame.contentWindow;
+      const input = win.document.querySelector('input[type="text"]');
+      input.value = kw;
+      input.dispatchEvent(new win.Event('input', { bubbles: true }));
+      await sleep(600);
+    }
+    function countItems() {
+      const d = pageFrame.contentDocument;
+      return d ? d.querySelectorAll('.moekoe-suggest-item').length : -1;
+    }
+    function pageLS(key) {
+      return pageFrame.contentWindow.localStorage.getItem(key);
+    }
+    function setSlider(id, val) {
+      const win = popupFrame.contentWindow;
+      const el = popupFrame.contentDocument.getElementById(id);
+      el.value = String(val);
+      el.dispatchEvent(new win.Event('input', { bubbles: true }));
+    }
+
+    async function runTests() {
+      passCount = 0; failCount = 0; lines = [];
+      log('===== 测试开始 =====');
+
+      log('--- 准备：重置环境（清空 storage / localStorage，重载页面与 Background）---');
+      await resetEnv();
+      if (!(await waitReady())) {
+        log('❌ FAIL: 环境初始化超时（iframe / 监听未就绪）', 'fail');
+        log('===== 测试结束：' + passCount + ' 通过, ' + failCount + ' 失败 =====');
+        return;
+      }
+      log('  ✅ 环境就绪：content script 已绑定搜索框，Background 监听已注册');
+
+      // Test A: 默认配置
+      log('--- Test A: 默认配置应显示 10 条建议 ---');
+      const countDisplay = popupFrame.contentDocument.getElementById('suggestCount').textContent;
+      assert(countDisplay === '10', 'popup 显示默认最大建议数为 10（实际 ' + countDisplay + '）');
+      await doSearch('默认配置');
+      assert(countItems() === 10, '默认配置搜索显示 10 条建议（实际 ' + countItems() + '）');
+      dumpChannelLogs();
+
+      // Test B: 保存 maxResults=15，验证实时同步
+      log('--- Test B: 保存 maxResults=15，验证实时同步 ---');
+      setSlider('maxResultsSlider', 15);
+      popupFrame.contentDocument.getElementById('saveBtn').click();
+      await sleep(200);
+      let lsMax = parseInt(pageLS('search_maxResults'));
+      assert(lsMax === 15, '保存后 200ms 内页面 localStorage 已同步为 15（实际 ' + lsMax + '）');
+      assert(pageFrame.contentWindow.location.hash.indexOf('__moekoe_cfg') !== -1,
+        'popup 已通过 URL hash 携带配置');
+      assert(popupFrame.contentDocument.getElementById('suggestCount').textContent === '15',
+        'popup UI 状态已更新为 15');
+      await sleep(1300);
+      assert(kernel().storageData.maxResults === 15, 'chrome.storage 中 maxResults = 15（实际 ' + kernel().storageData.maxResults + '）');
+      await doSearch('保存后搜索');
+      assert(countItems() === 15, '保存后搜索显示 15 条建议（实际 ' + countItems() + '）');
+      dumpChannelLogs();
+
+      // Test C: 热度阈值过滤
+      log('--- Test C: 热度阈值 600 过滤（模拟数据 14 条热度≥600）---');
+      setSlider('hotThresholdSlider', 600);
+      popupFrame.contentDocument.getElementById('saveBtn').click();
+      await sleep(1500);
+      await doSearch('阈值测试');
+      assert(countItems() === 14, '热度阈值 600 显示 14 条建议（实际 ' + countItems() + '）');
+      dumpChannelLogs();
+
+      // Test D: hash 通道独立验证（断开 Background，隔离推送通道）
+      log('--- Test D: hash 通道独立验证（断开 Background）---');
+      kernel().clearBgHandlers();
+      const hashCfg = { maxResults: 18, hotThreshold: 100, enableHistory: true, autoSearch: true };
+      // 先让 chrome.storage 与 hash 配置一致，避免 relay 1s 轮询在检查窗口内用旧值覆盖
+      kernel().storageSet({ ...hashCfg, searchCount: 0 });
+      await sleep(100);
+      pageFrame.contentWindow.location.hash = '__moekoe_cfg=' + encodeURIComponent(JSON.stringify(hashCfg));
+      await sleep(500);
+      lsMax = parseInt(pageLS('search_maxResults'));
+      assert(lsMax === 18, 'Background 断开时 hash 配置仍同步为 18（实际 ' + lsMax + '）');
+      await reloadFrame(bgFrame);
+      await sleep(1500);
+      await doSearch('hash生效测试');
+      assert(countItems() === 18, 'hash 配置生效，显示 18 条建议（实际 ' + countItems() + '）');
+      dumpChannelLogs();
+
+      // Test E: 重启保留（重载页面 iframe 模拟重启）
+      log('--- Test E: 重启后配置保留 ---');
+      await reloadFrame(pageFrame);
+      await sleep(800);
+      lsMax = parseInt(pageLS('search_maxResults'));
+      assert(lsMax === 18, '重启后 localStorage 保留 maxResults=18（实际 ' + lsMax + '）');
+      await doSearch('重启保留测试');
+      assert(countItems() === 18, '重启后仍显示 18 条建议（实际 ' + countItems() + '）');
+      dumpChannelLogs();
+
+      // Test F: relay 中继通道（chrome.storage → postMessage → content，绕开扩展消息 API）
+      log('--- Test F: relay 中继通道实时同步 ---');
+      const relayIframe = pageFrame.contentDocument.querySelector('iframe[src*="relay-sim.html"]');
+      assert(!!relayIframe, 'relay 中继 iframe 已注入页面');
+      kernel().storageSet({ maxResults: 12, hotThreshold: 100, enableHistory: true, autoSearch: true, searchCount: 0 });
+      await sleep(400);
+      lsMax = parseInt(pageLS('search_maxResults'));
+      assert(lsMax === 12, 'relay 通道：storage 变化后 400ms 内 localStorage 同步为 12（实际 ' + lsMax + '）');
+      await doSearch('relay测试');
+      assert(countItems() === 12, 'relay 配置生效，显示 12 条建议（实际 ' + countItems() + '）');
+      dumpChannelLogs();
+
+      // Test G: 断开 Background 后 relay 通道仍实时同步（模拟 MoeKoe 完全受限环境）
+      log('--- Test G: Background 断开时 relay 仍实时同步 ---');
+      kernel().clearBgHandlers();
+      kernel().storageSet({ maxResults: 16, hotThreshold: 100, enableHistory: true, autoSearch: true, searchCount: 0 });
+      await sleep(400);
+      lsMax = parseInt(pageLS('search_maxResults'));
+      assert(lsMax === 16, 'Background 断开后 relay 仍同步为 16（实际 ' + lsMax + '）');
+      await doSearch('relay降级测试');
+      assert(countItems() === 16, 'relay 降级同步生效，显示 16 条建议（实际 ' + countItems() + '）');
+      dumpChannelLogs();
+
+      log('===== 测试结束：' + passCount + ' 通过, ' + failCount + ' 失败 =====');
+      document.title = 'TESTS-' + passCount + 'PASS-' + failCount + 'FAIL';
+    }
+
+    document.getElementById('runBtn').addEventListener('click', () => { runTests(); });
+    document.getElementById('clearBtn').addEventListener('click', () => { lines = []; logEl.textContent = ''; });
+
+    if (location.search.indexOf('auto=1') !== -1) {
+      window.addEventListener('load', () => setTimeout(runTests, 300));
+    }
+  </script>
+</body>
+</html>
