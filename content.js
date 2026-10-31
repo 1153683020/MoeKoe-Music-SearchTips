@@ -1,4 +1,4 @@
-// content.js - chrome.storage 直连（get + onChanged 实时同步）+ 搜索建议
+// content.js - 配置同步（chrome.storage 直连 / 中继 iframe 自适应）+ 搜索建议
 (function() {
   'use strict';
 
@@ -10,6 +10,16 @@
     enableHistory: true,
     autoSearch: true
   };
+
+  // 环境探测：content script 中 chrome.storage 是否可用（不同 MoeKoe 版本表现不一致）
+  const HAS_DIRECT_STORAGE = (function() {
+    try {
+      return typeof chrome !== 'undefined' && !!chrome.storage && !!chrome.storage.local &&
+             typeof chrome.storage.local.get === 'function';
+    } catch (e) {
+      return false;
+    }
+  })();
 
   // 读取配置（单对象键，缺失字段用默认值补齐；兼容迁移旧版多键格式）
   function readConfig(callback) {
@@ -52,26 +62,71 @@
       this.highlightedIndex = -1;
       this.items = [];
       this.input = null;
+      this.suppressNext = false;
       this.config = { ...DEFAULTS };
       this.initConfig();
     }
 
     initConfig() {
       const self = this;
-      // 启动时读取一次
-      readConfig((config) => self.applyConfig(config));
-      // 监听变化：popup 保存后实时生效
-      try {
-        chrome.storage.onChanged.addListener((changes, area) => {
-          if (area === 'local' && changes[STORAGE_KEY]) {
-            const stored = changes[STORAGE_KEY].newValue || {};
-            console.log('[搜索建议] 检测到配置变化');
-            self.applyConfig({ ...DEFAULTS, ...stored });
-          }
-        });
-      } catch (e) {
-        console.warn('[搜索建议] chrome.storage 不可用:', e.message);
+      console.log('[搜索建议] chrome.storage', HAS_DIRECT_STORAGE ? '可用（直连模式）' : '不可用（中继模式）');
+      if (HAS_DIRECT_STORAGE) {
+        // 直连模式：启动读取 + onChanged 监听
+        readConfig((config) => self.applyConfig(config));
+        try {
+          chrome.storage.onChanged.addListener((changes, area) => {
+            if (area === 'local' && changes[STORAGE_KEY]) {
+              const stored = changes[STORAGE_KEY].newValue || {};
+              console.log('[搜索建议] 检测到配置变化');
+              self.applyConfig({ ...DEFAULTS, ...stored });
+            }
+          });
+        } catch (e) {
+          console.warn('[搜索建议] onChanged 监听失败:', e.message);
+        }
+      } else {
+        // 中继模式：注入扩展上下文的隐藏 iframe，经 postMessage 同步
+        this.listenForRelayMessages();
+        this.injectRelay();
       }
+    }
+
+    // 注入中继 iframe（扩展页面上下文：chrome.storage 可用）
+    injectRelay() {
+      try {
+        if (typeof chrome === 'undefined' || !chrome.runtime ||
+            typeof chrome.runtime.getURL !== 'function') {
+          console.warn('[搜索建议] runtime.getURL 不可用，中继无法注入');
+          return;
+        }
+        if (this.relayFrame && document.contains(this.relayFrame)) return;
+        const url = chrome.runtime.getURL('relay.html');
+        const frame = document.createElement('iframe');
+        frame.src = url;
+        frame.style.cssText = 'display:none;width:0;height:0;border:0;';
+        const self = this;
+        frame.addEventListener('load', () => {
+          self.relayReady = true;
+          console.log('[搜索建议] relay 中继已就绪');
+        });
+        (document.body || document.documentElement).appendChild(frame);
+        this.relayFrame = frame;
+        console.log('[搜索建议] relay 中继已注入');
+      } catch (e) {
+        console.warn('[搜索建议] relay 注入失败:', e);
+      }
+    }
+
+    // 监听中继 iframe 的 postMessage（配置下发）
+    listenForRelayMessages() {
+      const self = this;
+      window.addEventListener('message', (e) => {
+        if (!self.relayFrame || e.source !== self.relayFrame.contentWindow) return;
+        if (e.data && e.data.type === 'MOEKOE_SEARCH_CONFIG') {
+          console.log('[搜索建议] 收到 relay 配置');
+          self.applyConfig({ ...DEFAULTS, ...(e.data.value || {}) });
+        }
+      });
     }
 
     applyConfig(value) {
@@ -142,11 +197,7 @@
       this.container.querySelectorAll('.moekoe-suggest-item').forEach(el => {
         el.addEventListener('click', function() {
           const idx = parseInt(this.dataset.index);
-          if (self.input && self.items[idx]) {
-            self.input.value = self.items[idx].name;
-            self.input.dispatchEvent(new Event('input', { bubbles: true }));
-            self.hide();
-          }
+          self.selectItem(self.items[idx]);
         });
       });
     }
@@ -186,11 +237,28 @@
         el.classList.toggle('moekoe-suggest-active', i === this.highlightedIndex);
       });
     }
-    selectHighlighted() {
-      if (this.highlightedIndex >= 0 && this.input && this.items[this.highlightedIndex]) {
-        this.input.value = this.items[this.highlightedIndex].name;
+    // 选中建议：填充输入框；autoSearch 开启时合成 Enter 触发萌音的 @keydown.enter="getSearch"
+    selectItem(item) {
+      if (!item) return;
+      if (this.input) {
+        this.suppressNext = true;
+        this.input.value = item.name;
         this.input.dispatchEvent(new Event('input', { bubbles: true }));
-        this.hide();
+      }
+      this.hide();
+      if (this.config.autoSearch && this.input) {
+        this.input.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          bubbles: true,
+          cancelable: true
+        }));
+      }
+    }
+
+    selectHighlighted() {
+      if (this.highlightedIndex >= 0 && this.items[this.highlightedIndex]) {
+        this.selectItem(this.items[this.highlightedIndex]);
       }
     }
   }
@@ -198,6 +266,42 @@
   // ========== 初始化 ==========
   const suggest = new SearchSuggest();
   let debounceTimer = null;
+
+  function todayStr() {
+    const d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  // 搜索计数：今日触发建议次数（跨天自动归零）
+  // 直连模式直接写 chrome.storage；中继模式经 postMessage 由 relay（扩展上下文）写入
+  function bumpSearchCount() {
+    try {
+      if (HAS_DIRECT_STORAGE) {
+        const today = todayStr();
+        chrome.storage.local.get(['searchCount', 'searchCountDate'], (res) => {
+          if (chrome.runtime.lastError) {
+            console.warn('[搜索建议] 读取计数失败:', chrome.runtime.lastError.message);
+            return;
+          }
+          const count = (res.searchCountDate === today ? (res.searchCount || 0) : 0) + 1;
+          chrome.storage.local.set({ searchCount: count, searchCountDate: today }, () => {
+            if (chrome.runtime.lastError) {
+              console.warn('[搜索建议] 写入计数失败:', chrome.runtime.lastError.message);
+            } else {
+              console.log('[搜索建议] 搜索计数已更新:', count);
+            }
+          });
+        });
+      } else if (suggest.relayReady && suggest.relayFrame) {
+        suggest.relayFrame.contentWindow.postMessage({ type: 'MOEKOE_SEARCH_COUNT_BUMP' }, '*');
+        console.log('[搜索建议] 计数请求已发往 relay');
+      } else {
+        console.warn('[搜索建议] relay 未就绪，本次计数跳过');
+      }
+    } catch (e) {
+      console.warn('[搜索建议] 计数异常:', e);
+    }
+  }
 
   function findSearchInput() {
     return document.querySelector('input[type="text"]') ||
@@ -260,6 +364,12 @@
     suggest.mount(panel);
 
     input.addEventListener('input', function(e) {
+      // 选中的建议自动填充不重复触发建议面板
+      if (suggest.suppressNext) {
+        suggest.suppressNext = false;
+        clearTimeout(debounceTimer);
+        return;
+      }
       const keyword = e.target.value.trim();
       clearTimeout(debounceTimer);
       if (keyword.length < 1) {
@@ -274,8 +384,12 @@
 
         console.log('[搜索建议] 最终显示 maxResults:', suggest.config.maxResults, '实际条数:', filtered.length);
         suggest.update(filtered);
-        if (filtered.length) suggest.show();
-        else suggest.hide();
+        if (filtered.length) {
+          suggest.show();
+          bumpSearchCount();
+        } else {
+          suggest.hide();
+        }
       }, 300);
     });
 
@@ -306,6 +420,9 @@
     const observer = new MutationObserver(() => {
       const input = findSearchInput();
       if (input && !input.hasAttribute('data-suggest-bound')) attachSearchListener();
+      if (!HAS_DIRECT_STORAGE && suggest.relayFrame && !document.contains(suggest.relayFrame)) {
+        suggest.injectRelay();
+      }
     });
     observer.observe(document.body, { childList: true, subtree: true });
   }

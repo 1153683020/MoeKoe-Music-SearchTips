@@ -213,12 +213,19 @@
   }
 
   if (role === 'page') {
-    // 模拟 MoeKoe 环境：chrome.storage 可用（开发者确认），消息 API 不可用
+    // 模拟 MoeKoe 环境：默认 chrome.storage 可用（开发者环境）；
+    // storage=off 时不提供 chrome.storage（模拟实测受限环境，走中继模式）
+    var storageOff = /[?&]storage=off/.test(location.search);
     window.chrome = {
-      storage: makeStorage(),
-      runtime: Object.assign(makeLastErrorGetter(), {})
+      runtime: Object.assign(makeLastErrorGetter(), {
+        getURL: function(p) { return 'relay-sim.html?role=relay'; }
+      })
     };
+    if (!storageOff) {
+      window.chrome.storage = makeStorage();
+    }
     kernel.registerPageWindow(window);
+    kernel.log('[page] chrome.storage ' + (storageOff ? '不可用（中继模式）' : '可用（直连模式）'));
   } else if (role === 'relay') {
     // 模拟扩展页面上下文：chrome.storage / onChanged 完整可用
     window.chrome = {

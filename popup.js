@@ -35,6 +35,11 @@ console.log('[Popup] popup.js 文件已加载');
 
     let currentConfig = { ...defaults, searchCount: 0 };
 
+    function todayStr() {
+      const d = new Date();
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    }
+
     function showToast(message, duration = 2000) {
       toast.textContent = message;
       toast.classList.add('show');
@@ -46,7 +51,7 @@ console.log('[Popup] popup.js 文件已加载');
 
     // 读取配置（与 content.js 相同的单对象键 + 旧版多键迁移）
     function readConfig(callback) {
-      chrome.storage.local.get([STORAGE_KEY, 'searchCount', ...LEGACY_KEYS], function(res) {
+      chrome.storage.local.get([STORAGE_KEY, 'searchCount', 'searchCountDate', ...LEGACY_KEYS], function(res) {
         if (chrome.runtime.lastError) {
           console.warn('[Popup] 读取配置失败:', chrome.runtime.lastError.message);
           callback({ ...defaults, searchCount: 0 });
@@ -69,7 +74,9 @@ console.log('[Popup] popup.js 文件已加载');
         } else {
           cfg = { ...defaults, ...cfg };
         }
-        callback({ ...cfg, searchCount: res.searchCount || 0 });
+        // 计数按天显示：非今天的计数视为 0
+        const count = res.searchCountDate === todayStr() ? (res.searchCount || 0) : 0;
+        callback({ ...cfg, searchCount: count });
       });
     }
 
@@ -185,7 +192,7 @@ console.log('[Popup] popup.js 文件已加载');
 
     // 重置统计
     resetBtn.addEventListener('click', function() {
-      chrome.storage.local.set({ searchCount: 0 }, function() {
+      chrome.storage.local.set({ searchCount: 0, searchCountDate: todayStr() }, function() {
         currentConfig.searchCount = 0;
         updateStatusUI();
         showToast('🔄 统计已重置');
@@ -206,6 +213,20 @@ console.log('[Popup] popup.js 文件已加载');
         updateStatusUI();
       }
     });
+
+    // 定时刷新计数：避免个别环境 popup 侧 onChanged 不触发
+    setInterval(function() {
+      try {
+        chrome.storage.local.get(['searchCount', 'searchCountDate'], function(res) {
+          if (chrome.runtime.lastError) return;
+          const count = res.searchCountDate === todayStr() ? (res.searchCount || 0) : 0;
+          if (count !== currentConfig.searchCount) {
+            currentConfig.searchCount = count;
+            updateStatusUI();
+          }
+        });
+      } catch (e) {}
+    }, 2000);
 
     // 初始化
     document.addEventListener('DOMContentLoaded', function() {

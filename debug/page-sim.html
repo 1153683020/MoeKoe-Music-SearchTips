@@ -37,6 +37,18 @@
     <input type="text" placeholder="搜索音乐..." id="mockSearchInput">
   </div>
   <p class="hint">在上方搜索框输入即可看到搜索建议（由 content.js 注入）</p>
+  <p class="hint">最后模拟搜索（@keydown.enter 触发）：<span id="lastSearch">（无）</span></p>
+  <script>
+    // 模拟萌音 Header.vue 的 @keydown.enter="getSearch"：记录 Enter 触发时的关键词
+    (function() {
+      var input = document.getElementById('mockSearchInput');
+      input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          document.getElementById('lastSearch').textContent = this.value || '（空）';
+        }
+      });
+    })();
+  </script>
   <script src="../content.js"></script>
 </body>
 </html>

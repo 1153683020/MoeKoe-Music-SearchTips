@@ -24,11 +24,12 @@
 
 - 基于 Chrome Extension Manifest V3 开发。
 - 采用纯前端 `fetch` 方式调用搜索建议接口。
-- 配置存储与同步采用 `chrome.storage` 直连（经 MoeKoe Music 开发者确认，content script 中 `chrome.storage` 可用，需声明 `storage` 权限）：
-  - popup 与 content 使用统一的对象键 `search-suggest-config`，缺失字段自动用默认值补齐；
-  - popup 保存后，content 通过 `chrome.storage.onChanged` **实时生效，无需刷新页面**；
-  - 自动兼容迁移 v1.2.1 及更早版本的多键配置格式。
+- 配置存储使用 `chrome.storage` 单对象键 `search-suggest-config`（缺失字段自动用默认值补齐，自动迁移旧版多键格式）。
+- 同步通道按环境**自适应**（content script 启动时探测 `chrome.storage.local` 可用性；部分 MoeKoe 版本 content 中仅 `onChanged` 可用而读写接口不可用）：
+  1. **直连模式**：`chrome.storage.local` 可用时，直接 `get` + `onChanged` 监听，保存后实时生效；
+  2. **中继模式**：`chrome.storage.local` 不可用时，自动注入插件自身的隐藏 iframe（扩展页面上下文，`chrome.storage` 完整可用），配置经 `postMessage` 下发、搜索计数经 `postMessage` 上传，由中继页代为读写 `chrome.storage`。
 - 不使用 URL hash 传递配置：萌音为 hash 路由模式，会影响 Vue 路由与页面渲染（开发者审查意见）。
+- popup 打开期间每 2 秒主动刷新计数显示，避免个别环境 `onChanged` 不触发。
 
 ## 📦 安装
 
@@ -50,9 +51,13 @@ AZLight
 
 ## 📄 版本
 
-1.3.0
+1.3.2
 
 ## 📝 备注
+
+v1.3.2 修复计数问题并引入**双模式自适应**：实测发现部分 MoeKoe 版本的 content script 中 `chrome.storage.local`（读写接口）不可用（仅 `onChanged` 可用），据此改为自动探测——读写可用时走直连（开发者建议），不可用时自动注入中继 iframe（扩展上下文）完成配置下发与计数上传，两种模式均实时生效。另修复 ZIP 包因路径分隔符问题无法安装的问题。
+
+v1.3.1 修复两个问题：① 点击建议后无法自动搜索——现在选中建议会按"选择后自动搜索"开关合成 Enter 键事件触发萌音的搜索（`@keydown.enter="getSearch"`）；② 状态页"今日已触发建议"始终为 0——现在每次展示建议都会按天累计计数并在 popup 实时显示。
 
 v1.3.0 按 MoeKoe Music 开发者审查意见重构：确认 `chrome.storage` 在 content script 中可用，简化为 `chrome.storage` 直连（`get` + `onChanged` 实时同步），移除 URL hash 通道（避免破坏萌音的 hash 路由）、中继 iframe、Background 中转与页面 `localStorage` 镜像，配置保存后实时生效，无需手动刷新。
 
@@ -252,5 +257,44 @@ popup 保存
 启动时
   └─ content/popup: chrome.storage.local.get → 默认值补齐 → 应用（旧格式自动迁移）
 ```
+
+---
+
+### 13. v1.3.1 修复：点击建议不搜索与计数问题（2026-10）
+
+#### 问题 1：点击建议后不能自动搜索
+
+**原因**：选中建议只做了"填充输入框 + 派发 input 事件"，而萌音的搜索由搜索框的 `@keydown.enter="getSearch"` 触发（`src/components/Header.vue`），input 事件不会触发搜索；键盘 Enter 选择建议时物理按键会自然冒泡触发搜索，唯独鼠标点击路径缺少这一步。
+
+**修复**：选中建议（点击或键盘）统一走 `selectItem()`——填充输入框、隐藏面板，并在"选择后自动搜索"开关开启时合成 `KeyboardEvent('keydown', { key: 'Enter' })` 派发到搜索框，触发萌音自身的搜索逻辑。同时用 `suppressNext` 标记跳过自动填充引起的重复建议请求（避免选中后面板重新弹出）。
+
+#### 问题 2："今日已触发 0 次建议"始终为 0
+
+**原因**：popup 只有重置与展示逻辑，content script 从未写入计数。
+
+**修复**：content script 每次展示建议后按天累计写入 `chrome.storage`（`searchCount` + `searchCountDate`，跨天自动归零），popup 通过已有的 `storage.onChanged` 监听实时刷新显示；"重置统计"同时更新计数日期。
+
+---
+
+### 14. v1.3.2 修复：计数问题与双模式自适应（2026-10）
+
+#### 诊断结论
+
+v1.3.1 在真实环境验证时，控制台输出 `chrome.storage 不可用，计数跳过`。结合 v1.3.0 在同一环境的实测（配置实时同步正常），最终确认：**部分 MoeKoe 版本的 content script 中 `chrome.storage.onChanged` 可用，但 `chrome.storage.local`（读写接口）不可用**。即配置可以"听"到变化，但 content 无法读取初始值、也无法写入（计数因此为 0）。
+
+#### 修复：双模式自适应
+
+content script 启动时探测 `chrome.storage.local` 可用性，自动选择通道：
+
+| 模式 | 触发条件 | 配置下发 | 计数上传 |
+|------|----------|----------|----------|
+| **直连模式** | `chrome.storage.local` 可用 | content 直接 `get` + `onChanged` | content 直接写 `chrome.storage` |
+| **中继模式** | `chrome.storage.local` 不可用 | 注入隐藏 iframe（扩展上下文），relay 经 `onChanged` + 1 秒轮询读取后 `postMessage` 下发 | content `postMessage` 请求 → relay（扩展上下文）代写 `chrome.storage` |
+
+中继页职责：读取配置（含旧版多键自动迁移）、监听配置变化、接收计数请求，全部在扩展上下文完成（与 popup 同等能力，实测可靠）。
+
+另修复插件 ZIP 包安装失败问题：PowerShell `Compress-Archive` 生成的 zip 内部路径使用反斜杠且缺少顶层目录，导致 MoeKoe 解析不到 `manifest.json`；改用 .NET API 以 `插件名/manifest.json` 的正斜杠路径重新打包。
+
+调试台新增双模式测试矩阵（直连 17 项 + 中继 17 项），共 34 项端到端测试全部通过。
 
 **Enjoy your searching!** 🔍

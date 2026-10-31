@@ -27,14 +27,14 @@
   <h1>MoeKoe-Music-SearchTips 调试台</h1>
   <div class="layout">
     <div class="left">
-      <h2>模拟 MoeKoe Music 页面（chrome.storage 可用，消息 API 不可用）</h2>
+      <h2>模拟 MoeKoe Music 页面（直连 / 中继两种模式自动切换）</h2>
       <iframe id="pageFrame" src="page-sim.html?role=page"></iframe>
     </div>
     <div class="right">
       <h2>插件 Popup（真实 popup.html + popup.js）</h2>
       <iframe id="popupFrame" src="popup-sim.html?role=popup"></iframe>
       <div class="btns">
-        <button id="runBtn">▶ 运行完整测试</button>
+        <button id="runBtn">▶ 运行完整测试（双模式）</button>
         <button id="clearBtn" class="secondary">🧹 清空日志</button>
       </div>
       <pre id="log"></pre>
@@ -74,6 +74,14 @@
       });
     }
 
+    function setPageMode(mode) {
+      const url = mode === 'relay' ? 'page-sim.html?role=page&storage=off' : 'page-sim.html?role=page';
+      return new Promise(res => {
+        pageFrame.addEventListener('load', res, { once: true });
+        pageFrame.src = url;
+      });
+    }
+
     async function waitReady() {
       for (let i = 0; i < 80; i++) {
         const pd = pageFrame.contentDocument;
@@ -85,15 +93,6 @@
         await sleep(100);
       }
       return false;
-    }
-
-    async function resetEnv() {
-      const k = kernel();
-      try { pageFrame.contentWindow.localStorage.clear(); } catch (e) {}
-      k.resetStorage();
-      await Promise.all([reloadFrame(pageFrame), reloadFrame(popupFrame)]);
-      await waitReady();
-      await sleep(300);
     }
 
     async function doSearch(kw) {
@@ -114,52 +113,82 @@
       el.dispatchEvent(new win.Event('input', { bubbles: true }));
     }
 
-    async function runTests() {
-      passCount = 0; failCount = 0; lines = [];
-      log('===== 测试开始 =====');
+    async function runSuite(mode) {
+      log('');
+      log('===== 测试模式：' + (mode === 'relay' ? '中继模式（chrome.storage 不可用，模拟实测受限环境）' : '直连模式（chrome.storage 可用，模拟开发者环境）') + ' =====');
 
-      log('--- 准备：重置环境（清空 storage / localStorage，重载页面与 Popup）---');
-      await resetEnv();
+      // 清空 storage 后以对应模式重载页面与 popup
+      const k = kernel();
+      try { pageFrame.contentWindow.localStorage.clear(); } catch (e) {}
+      k.resetStorage();
+      await setPageMode(mode);
+      await reloadFrame(popupFrame);
+      await waitReady();
+      await sleep(400);
       if (!(await waitReady())) {
-        log('❌ FAIL: 环境初始化超时（iframe / 监听未就绪）', 'fail');
-        log('===== 测试结束：' + passCount + ' 通过, ' + failCount + ' 失败 =====');
+        log('❌ FAIL: 环境初始化超时', 'fail');
         return;
       }
-      log('  ✅ 环境就绪：content script 已绑定搜索框，popup 已加载');
+      log('  ✅ 环境就绪');
 
       // Test A: 默认配置
       log('--- Test A: 默认配置应显示 10 条建议 ---');
       const countDisplay = popupFrame.contentDocument.getElementById('suggestCount').textContent;
-      assert(countDisplay === '10', 'popup 显示默认最大建议数为 10（实际 ' + countDisplay + '）');
-      assert(!!kernel().storageData[STORAGE_KEY], '首启后 chrome.storage 已持久化默认配置');
+      assert(countDisplay === '10', '[' + mode + '] popup 显示默认最大建议数为 10（实际 ' + countDisplay + '）');
+      assert(!!kernel().storageData[STORAGE_KEY], '[' + mode + '] 首启后 chrome.storage 已持久化默认配置');
       await doSearch('默认配置');
-      assert(countItems() === 10, '默认配置搜索显示 10 条建议（实际 ' + countItems() + '）');
+      assert(countItems() === 10, '[' + mode + '] 默认配置搜索显示 10 条建议（实际 ' + countItems() + '）');
       dumpChannelLogs();
 
-      // Test B: 保存 maxResults=15，验证 onChanged 实时生效（无需刷新）
-      log('--- Test B: 保存 maxResults=15，验证 onChanged 实时生效 ---');
+      // Test B: 保存 maxResults=15，验证实时生效（无需刷新）
+      log('--- Test B: 保存 maxResults=15，验证实时生效 ---');
       setSlider('maxResultsSlider', 15);
       popupFrame.contentDocument.getElementById('saveBtn').click();
-      await sleep(300);
+      await sleep(400);
       assert(kernel().storageData[STORAGE_KEY] && kernel().storageData[STORAGE_KEY].maxResults === 15,
-        'chrome.storage 中 search-suggest-config.maxResults = 15');
+        '[' + mode + '] chrome.storage 中 search-suggest-config.maxResults = 15');
       assert(popupFrame.contentDocument.getElementById('suggestCount').textContent === '15',
-        'popup UI 状态已更新为 15');
+        '[' + mode + '] popup UI 状态已更新为 15');
       await doSearch('保存后搜索');
-      assert(countItems() === 15, '保存后无需刷新，搜索即显示 15 条建议（实际 ' + countItems() + '）');
+      assert(countItems() === 15, '[' + mode + '] 保存后无需刷新，搜索即显示 15 条建议（实际 ' + countItems() + '）');
       dumpChannelLogs();
 
       // Test C: 热度阈值过滤
-      log('--- Test C: 热度阈值 600 过滤（模拟数据 14 条热度≥600）---');
+      log('--- Test C: 热度阈值 600 过滤 ---');
       setSlider('hotThresholdSlider', 600);
       popupFrame.contentDocument.getElementById('saveBtn').click();
-      await sleep(300);
+      await sleep(400);
       await doSearch('阈值测试');
-      assert(countItems() === 14, '热度阈值 600 显示 14 条建议（实际 ' + countItems() + '）');
+      assert(countItems() === 14, '[' + mode + '] 热度阈值 600 显示 14 条建议（实际 ' + countItems() + '）');
       dumpChannelLogs();
 
-      // Test D: 旧版多键配置迁移
-      log('--- Test D: 旧版多键配置自动迁移 ---');
+      // Test D: 点击建议自动搜索 + 搜索计数
+      log('--- Test D: 点击建议自动搜索 + 计数 ---');
+      const beforeCount = kernel().storageData.searchCount || 0;
+      const firstName = pageFrame.contentDocument.querySelector('.moekoe-suggest-item .moekoe-suggest-name').textContent;
+      pageFrame.contentDocument.querySelector('.moekoe-suggest-item').click();
+      await sleep(300);
+      const lastSearch = pageFrame.contentDocument.getElementById('lastSearch').textContent;
+      assert(lastSearch === firstName, '[' + mode + '] 点击建议后自动搜索（@keydown.enter 收到 ' + lastSearch + '）');
+      const panelEl = pageFrame.contentDocument.querySelector('.moekoe-search-suggest-panel');
+      assert(panelEl && panelEl.style.display === 'none', '[' + mode + '] 点击建议后建议面板已隐藏');
+      assert((kernel().storageData.searchCount || 0) === beforeCount,
+        '[' + mode + '] 点击建议（自动填充）不额外计数（保持 ' + beforeCount + '，实际 ' + (kernel().storageData.searchCount || 0) + '）');
+      assert(!!kernel().storageData.searchCountDate, '[' + mode + '] 搜索计数日期已记录');
+      dumpChannelLogs();
+
+      // Test E: 再次搜索计数递增 + popup 实时显示
+      log('--- Test E: 搜索计数递增与 popup 实时显示 ---');
+      await doSearch('计数测试');
+      assert((kernel().storageData.searchCount || 0) === beforeCount + 1,
+        '[' + mode + '] 再次搜索后计数 +1（期望 ' + (beforeCount + 1) + '，实际 ' + (kernel().storageData.searchCount || 0) + '）');
+      const countText = popupFrame.contentDocument.getElementById('searchCountDisplay').textContent;
+      assert(countText.indexOf(String(beforeCount + 1)) !== -1,
+        '[' + mode + '] popup 状态页实时显示计数（' + countText.trim() + '）');
+      dumpChannelLogs();
+
+      // Test F: 旧版多键配置迁移
+      log('--- Test F: 旧版多键配置自动迁移 ---');
       kernel().storageRemove([STORAGE_KEY]);
       kernel().storageSet({
         search_maxResults: 17,
@@ -171,22 +200,29 @@
       await waitReady();
       await sleep(400);
       const migrated = kernel().storageData[STORAGE_KEY];
-      assert(!!migrated && migrated.maxResults === 17, '旧版多键已迁移为 search-suggest-config.maxResults=17');
+      assert(!!migrated && migrated.maxResults === 17, '[' + mode + '] 旧版多键已迁移为 search-suggest-config.maxResults=17');
       const legacyGone = LEGACY_KEYS.every(k => !(k in kernel().storageData));
-      assert(legacyGone, '迁移后旧版多键已清除');
+      assert(legacyGone, '[' + mode + '] 迁移后旧版多键已清除');
       await doSearch('迁移测试');
-      assert(countItems() === 17, '迁移配置生效，显示 17 条建议（实际 ' + countItems() + '）');
+      assert(countItems() === 17, '[' + mode + '] 迁移配置生效，显示 17 条建议（实际 ' + countItems() + '）');
       dumpChannelLogs();
 
-      // Test E: 重启保留（重载页面 iframe 模拟重启）
-      log('--- Test E: 重启后配置保留 ---');
+      // Test G: 重启保留（重载页面 iframe 模拟重启）
+      log('--- Test G: 重启后配置保留 ---');
       await reloadFrame(pageFrame);
       await waitReady();
       await sleep(400);
       await doSearch('重启保留测试');
-      assert(countItems() === 17, '重启后仍显示 17 条建议（实际 ' + countItems() + '）');
+      assert(countItems() === 17, '[' + mode + '] 重启后仍显示 17 条建议（实际 ' + countItems() + '）');
       dumpChannelLogs();
+    }
 
+    async function runTests() {
+      passCount = 0; failCount = 0; lines = [];
+      log('===== 测试开始 =====');
+      await runSuite('direct');
+      await runSuite('relay');
+      log('');
       log('===== 测试结束：' + passCount + ' 通过, ' + failCount + ' 失败 =====');
       document.title = 'TESTS-' + passCount + 'PASS-' + failCount + 'FAIL';
     }
