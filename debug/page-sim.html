@@ -11,23 +11,17 @@
     .hint { color: #999; font-size: 12px; }
   </style>
   <script src="mock-env.js"></script>
+  <!-- 搜索建议数据由 mock-env.js 模拟的 kugouapi 提供（MoeKoe 1.7.2+，不再拦截 6521 fetch） -->
+  <script src="../main-world.js"></script>
   <script>
-    // 拦截对本地搜索接口的请求，返回模拟建议数据（20 条，热度递减 1000→430）
+    // ?mwapi=1：main-world.js（主世界脚本）已在加载时捕获 kugouapi 引用，
+    // 此处从共享 window 移除，模拟"主世界可见、隔离世界不可见"的真实双世界形态
     (function() {
-      var realFetch = window.fetch ? window.fetch.bind(window) : null;
-      var MOCK = [];
-      for (var i = 0; i < 20; i++) {
-        MOCK.push({ HintInfo: 'Mock歌曲' + (i + 1) + ' - Mock歌手' + ((i % 5) + 1), Hot: 1000 - i * 30 });
+      if (/[?&]mwapi=1/.test(location.search) && window.kugouapi) {
+        try { delete window.kugouapi; } catch (e) { window.kugouapi = undefined; }
+        var k = window.top.__moekoeKernel;
+        if (k && k.log) k.log('[page] kugouapi 已从共享 window 移除（模拟隔离世界，主世界脚本持引用）');
       }
-      window.fetch = function(url, opts) {
-        if (String(url).indexOf('127.0.0.1:6521/search/suggest') !== -1) {
-          return Promise.resolve(new Response(
-            JSON.stringify({ data: [{ RecordDatas: MOCK }] }),
-            { status: 200, headers: { 'Content-Type': 'application/json' } }
-          ));
-        }
-        return realFetch(url, opts);
-      };
     })();
   </script>
 </head>

@@ -87,8 +87,13 @@
       } else {
         // 中继模式：注入扩展上下文的隐藏 iframe，经 postMessage 同步
         this.listenForRelayMessages();
-        this.injectRelay();
       }
+      // 中继 iframe 始终注入：除配置同步外，还承担 kugouapi 不可用环境下的接口代理
+      this.listenForSuggestResults();
+      // 主世界桥接：注册监听并提前握手探测 kugouapi（桥接脚本就绪后回报 READY）
+      listenForMainWorldBridge();
+      pingMainWorld();
+      this.injectRelay();
     }
 
     // 注入中继 iframe（扩展页面上下文：chrome.storage 可用）
@@ -125,6 +130,18 @@
         if (e.data && e.data.type === 'MOEKOE_SEARCH_CONFIG') {
           console.log('[搜索建议] 收到 relay 配置');
           self.applyConfig({ ...DEFAULTS, ...(e.data.value || {}) });
+        }
+      });
+    }
+
+    // 监听中继 iframe 的 kugouapi 代理响应（建议结果）
+    listenForSuggestResults() {
+      const self = this;
+      window.addEventListener('message', (e) => {
+        if (!self.relayFrame || e.source !== self.relayFrame.contentWindow) return;
+        // 结果由 fetchSuggestions 的 requestId 匹配处理，这里仅保留调试信息
+        if (e.data && e.data.type === 'MOEKOE_SEARCH_SUGGEST_RESULT') {
+          console.log('[搜索建议] 收到 relay 代理响应 id=' + e.data.id);
         }
       });
     }
@@ -324,30 +341,172 @@
     }
   }
 
-  async function fetchSuggestions(keyword) {
+  // ---------- 搜索建议请求（MoeKoe 1.7.2+ 迁移） ----------
+  // 客户端 1.7.2 起默认不再开放本地 6521 Web API 端口，改用客户端注入主世界的
+  // kugouapi.request()（不经过网络端口、无需用户开启 API 模式，也无需声明额外权限）。
+  // 隔离世界的 content script 与 relay 子框架均访问不到 kugouapi（Electron preload
+  // 不注入子框架），故按环境三级降级：
+  //   ① 主世界直接调用（部分版本 content 与 kugouapi 同处主世界）；
+  //   ② 主世界桥接：main-world.js（"world": "MAIN"）与 kugouapi 同处主世界，
+  //      经 window.postMessage 握手并代理请求（跨世界必通的 DOM 机制）；
+  //   ③ relay（插件页面上下文）postMessage 代理兜底。
+  let suggestSeq = 0;
+
+  function kugouapiAvailable() {
     try {
-      const response = await fetch(
-        `http://127.0.0.1:6521/search/suggest?keywords=${encodeURIComponent(keyword)}`,
-        {
-          headers: {
-            'Authorization': getAuthHeader(),
-            'Content-Type': 'application/json'
+      return typeof window.kugouapi === 'object' && window.kugouapi !== null &&
+             typeof window.kugouapi.request === 'function';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function parseSuggestBody(body) {
+    if (body?.data && Array.isArray(body.data)) {
+      return body.data.flatMap(group =>
+        (group.RecordDatas || []).map(item => ({
+          name: item.HintInfo || '',
+          hot: parseInt(item.Hot) || 0
+        }))
+      ).sort((a, b) => b.hot - a.hot);
+    }
+    return [];
+  }
+
+  async function requestSuggestDirect(keyword) {
+    // kugouapi.request 返回的是已解析的结果对象 { status, body, ... }，不要调用 .json()
+    const result = await window.kugouapi.request(
+      `/search/suggest?keywords=${encodeURIComponent(keyword)}`,
+      { headers: { Authorization: getAuthHeader() } }
+    );
+    if (!result || result.status !== 200) {
+      throw new Error(result?.body?.error_msg || '请求失败(' + (result?.status ?? '无响应') + ')');
+    }
+    return parseSuggestBody(result.body);
+  }
+
+  function requestSuggestViaRelay(keyword) {
+    return new Promise((resolve, reject) => {
+      if (!suggest.relayReady || !suggest.relayFrame) {
+        reject(new Error('relay 未就绪'));
+        return;
+      }
+      const id = ++suggestSeq;
+      const frame = suggest.relayFrame;
+      const onMessage = (e) => {
+        if (e.source !== frame.contentWindow) return;
+        if (e.data && e.data.type === 'MOEKOE_SEARCH_SUGGEST_RESULT' && e.data.id === id) {
+          window.removeEventListener('message', onMessage);
+          clearTimeout(timer);
+          if (e.data.ok) {
+            resolve(parseSuggestBody(e.data.body));
+          } else {
+            reject(new Error(e.data.error || 'relay 代理请求失败'));
           }
         }
-      );
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      const data = await response.json();
-      if (data?.data && Array.isArray(data.data)) {
-        return data.data.flatMap(group =>
-          (group.RecordDatas || []).map(item => ({
-            name: item.HintInfo || '',
-            hot: parseInt(item.Hot) || 0
-          }))
-        ).sort((a, b) => b.hot - a.hot);
+      };
+      const timer = setTimeout(() => {
+        window.removeEventListener('message', onMessage);
+        reject(new Error('relay 代理请求超时'));
+      }, 8000);
+      window.addEventListener('message', onMessage);
+      frame.contentWindow.postMessage({
+        type: 'MOEKOE_SEARCH_SUGGEST',
+        id: id,
+        keyword: keyword,
+        auth: getAuthHeader()
+      }, '*');
+    });
+  }
+
+  // ---------- 主世界桥接（MoeKoe 1.7.2+） ----------
+  // 真实环境实测：content script（隔离世界）与 relay 子框架均访问不到 kugouapi
+  // （Electron preload 不注入子框架）。由 manifest 以 "world": "MAIN" 注入的
+  // main-world.js 与 kugouapi 同处主世界，经 window.postMessage 代为请求。
+  let mwReady = false;
+  let mwBridgeAbsent = false;
+  const mwPending = new Map();
+
+  function listenForMainWorldBridge() {
+    window.addEventListener('message', (e) => {
+      if (e.source !== window) return;
+      const d = e.data;
+      if (!d || typeof d !== 'object') return;
+      if (d.type === 'MOEKOE_SEARCH_SUGGEST_MW_READY') {
+        if (!mwReady) console.log('[搜索建议] 主世界桥接已就绪（kugouapi 可用）');
+        mwReady = true;
+      } else if (d.type === 'MOEKOE_SEARCH_SUGGEST_MW_UNAVAILABLE') {
+        if (!mwBridgeAbsent) console.log('[搜索建议] 主世界无 kugouapi，桥接不可用');
+        mwBridgeAbsent = true;
+      } else if (d.type === 'MOEKOE_SEARCH_SUGGEST_MW_RESULT') {
+        const pending = mwPending.get(d.id);
+        if (!pending) return;
+        mwPending.delete(d.id);
+        clearTimeout(pending.timer);
+        if (d.ok) {
+          pending.resolve(parseSuggestBody(d.body));
+        } else {
+          pending.reject(new Error(d.error || '主世界桥接请求失败'));
+        }
       }
-      return [];
+    });
+  }
+
+  function pingMainWorld() {
+    try {
+      window.postMessage({ type: 'MOEKOE_SEARCH_SUGGEST_MW_PING' }, '*');
+    } catch (e) {}
+  }
+
+  function waitForMwReady(timeoutMs) {
+    if (mwReady) return Promise.resolve(true);
+    if (mwBridgeAbsent) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const start = Date.now();
+      pingMainWorld();
+      const iv = setInterval(() => {
+        if (mwReady) {
+          clearInterval(iv);
+          resolve(true);
+        } else if (mwBridgeAbsent || Date.now() - start >= timeoutMs) {
+          clearInterval(iv);
+          mwBridgeAbsent = true;
+          resolve(false);
+        } else {
+          pingMainWorld();
+        }
+      }, 250);
+    });
+  }
+
+  function requestSuggestViaMainWorld(keyword) {
+    return new Promise((resolve, reject) => {
+      const id = ++suggestSeq;
+      const timer = setTimeout(() => {
+        mwPending.delete(id);
+        reject(new Error('主世界桥接请求超时'));
+      }, 8000);
+      mwPending.set(id, { resolve, reject, timer });
+      window.postMessage({
+        type: 'MOEKOE_SEARCH_SUGGEST_MW',
+        id: id,
+        keyword: keyword,
+        auth: getAuthHeader()
+      }, '*');
+    });
+  }
+
+  async function fetchSuggestions(keyword) {
+    try {
+      if (kugouapiAvailable()) {
+        return await requestSuggestDirect(keyword);
+      }
+      if (mwReady || (!mwBridgeAbsent && await waitForMwReady(1500))) {
+        return await requestSuggestViaMainWorld(keyword);
+      }
+      return await requestSuggestViaRelay(keyword);
     } catch (e) {
-      console.warn('[搜索建议] fetch 失败:', e.message);
+      console.warn('[搜索建议] 请求失败:', e.message);
       return [];
     }
   }
@@ -420,7 +579,7 @@
     const observer = new MutationObserver(() => {
       const input = findSearchInput();
       if (input && !input.hasAttribute('data-suggest-bound')) attachSearchListener();
-      if (!HAS_DIRECT_STORAGE && suggest.relayFrame && !document.contains(suggest.relayFrame)) {
+      if (suggest.relayFrame && !document.contains(suggest.relayFrame)) {
         suggest.injectRelay();
       }
     });

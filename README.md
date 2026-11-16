@@ -23,11 +23,12 @@
 ## ⚙️ 技术说明
 
 - 基于 Chrome Extension Manifest V3 开发。
-- 采用纯前端 `fetch` 方式调用搜索建议接口。
+- 搜索建议接口调用（适配 MoeKoe Music 1.7.2+）：客户端 1.7.2 起默认不再开放本地 6521 Web API 端口，改用客户端注入主世界的 `kugouapi.request()` 调用内置 API 服务（不经过网络端口、无需用户开启 API 模式、无需声明额外权限，登录态经 `headers.Authorization` 原样携带）。content script 运行在隔离世界访问不到 `kugouapi`，按环境三级降级：① 主世界直接调用 → ② 主世界桥接脚本（`main-world.js`，manifest 声明 `"world": "MAIN"`，`window.postMessage` 握手 + 代理请求）→ ③ 中继 iframe 代理。各通道均先校验 `status === 200` 再读取 `body`。
 - 配置存储使用 `chrome.storage` 单对象键 `search-suggest-config`（缺失字段自动用默认值补齐，自动迁移旧版多键格式）。
 - 同步通道按环境**自适应**（content script 启动时探测 `chrome.storage.local` 可用性；部分 MoeKoe 版本 content 中仅 `onChanged` 可用而读写接口不可用）：
   1. **直连模式**：`chrome.storage.local` 可用时，直接 `get` + `onChanged` 监听，保存后实时生效；
   2. **中继模式**：`chrome.storage.local` 不可用时，自动注入插件自身的隐藏 iframe（扩展页面上下文，`chrome.storage` 完整可用），配置经 `postMessage` 下发、搜索计数经 `postMessage` 上传，由中继页代为读写 `chrome.storage`。
+- 中继 iframe **始终注入**（v1.4.0 起）：除配置同步外，还承担 kugouapi 不可见环境下的搜索建议接口代理（`MOEKOE_SEARCH_SUGGEST` 请求/响应，8 秒超时兜底）。
 - 不使用 URL hash 传递配置：萌音为 hash 路由模式，会影响 Vue 路由与页面渲染（开发者审查意见）。
 - popup 打开期间每 2 秒主动刷新计数显示，避免个别环境 `onChanged` 不触发。
 
@@ -51,9 +52,11 @@ AZLight
 
 ## 📄 版本
 
-1.3.2
+1.4.0
 
 ## 📝 备注
+
+v1.4.0 迁移到 MoeKoe Music 1.7.2+ 接口调用方式（[官方迁移指南](https://music.moekoe.cn/guide/migrate-plugin-to-1.7.2)）：客户端 1.7.2 起默认不再在本机 6521 端口开放 Web API，原 `fetch('http://127.0.0.1:6521/search/suggest...')` 会直接失败。按指南推荐方案改用 `kugouapi.request()`（不经过网络端口、无需用户开启 API 模式、无需额外权限）。真实环境实测发现：content script（隔离世界）与 relay 子框架均访问不到 kugouapi（Electron preload 不注入子框架），故构建三级请求通道——① 主世界直接调用；② 新增 main-world.js（manifest 声明 `"world": "MAIN"`）与 kugouapi 同处主世界，经 `window.postMessage` 握手（READY/UNAVAILABLE 广播 + 250ms 重试 PING）并代理请求；③ relay（插件页面上下文）代理兜底，中继 iframe 自本版起始终注入。`minversion` 提升至 1.7.2。调试台同步新增 kugouapi mock（含 `?mwapi=1` 双世界形态模拟）与直连/桥接/中继三通道断言（3 × 18 = 54 项端到端测试）。
 
 v1.3.2 修复计数问题并引入**双模式自适应**：实测发现部分 MoeKoe 版本的 content script 中 `chrome.storage.local`（读写接口）不可用（仅 `onChanged` 可用），据此改为自动探测——读写可用时走直连（开发者建议），不可用时自动注入中继 iframe（扩展上下文）完成配置下发与计数上传，两种模式均实时生效。另修复 ZIP 包因路径分隔符问题无法安装的问题。
 

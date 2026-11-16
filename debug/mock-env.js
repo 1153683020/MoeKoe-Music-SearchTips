@@ -183,6 +183,31 @@
     };
   }
 
+  // ===== 模拟搜索建议数据与 kugouapi（MoeKoe 1.7.2+） =====
+  var MOCK_SUGGEST = [];
+  for (var mi = 0; mi < 20; mi++) {
+    MOCK_SUGGEST.push({ HintInfo: 'Mock歌曲' + (mi + 1) + ' - Mock歌手' + ((mi % 5) + 1), Hot: 1000 - mi * 30 });
+  }
+
+  // 模拟 MoeKoe 1.7.2 注入页面主世界 / 插件页面的 kugouapi 全局对象
+  // role 标注请求来源（page=content 直连 / relay=中继代理），写入内核日志供测试断言
+  function makeKugouapi(role) {
+    return {
+      request: function(path, payload) {
+        var hasAuth = !!(payload && payload.headers && payload.headers.Authorization);
+        kernel.log('[kugouapi:' + role + '] request ' + path + (hasAuth ? '（含登录态）' : ''));
+        return Promise.resolve({
+          status: 200,
+          body: { data: [{ RecordDatas: MOCK_SUGGEST.slice() }] },
+          cookie: [],
+          headers: {}
+        });
+      },
+      getDevice: function() { return { mocked: true }; },
+      generateNewDevice: function() { return { mocked: true }; }
+    };
+  }
+
   // ===== 按角色装配 window.chrome =====
   function makeLastErrorGetter() {
     return {
@@ -226,12 +251,24 @@
     }
     kernel.registerPageWindow(window);
     kernel.log('[page] chrome.storage ' + (storageOff ? '不可用（中继模式）' : '可用（直连模式）'));
+    // 模拟 MoeKoe 1.7.2 主世界 kugouapi 注入：
+    //   默认注入（与 content 同 realm 可见，走直连）
+    //   ?kugouapi=off 不注入（走 relay 代理）
+    //   ?mwapi=1 注入主世界专用实例（page-sim 在 main-world.js 捕获后移除共享引用，
+    //            模拟"主世界可见、隔离世界不可见"的双世界形态，走主世界桥接）
+    if (/[?&]mwapi=1/.test(location.search)) {
+      window.kugouapi = makeKugouapi('main');
+    } else if (!/[?&]kugouapi=off/.test(location.search)) {
+      window.kugouapi = makeKugouapi('page');
+    }
+    kernel.log('[page] kugouapi ' + (window.kugouapi ? '已注入' : '不可见（走 relay 代理）'));
   } else if (role === 'relay') {
-    // 模拟扩展页面上下文：chrome.storage / onChanged 完整可用
+    // 模拟扩展页面上下文：chrome.storage / onChanged 完整可用；kugouapi 同样可用（插件页面）
     window.chrome = {
       runtime: Object.assign(makeLastErrorGetter(), {}),
       storage: makeStorage()
     };
+    window.kugouapi = makeKugouapi('relay');
   } else if (role === 'popup') {
     window.chrome = {
       runtime: Object.assign(makeLastErrorGetter(), {

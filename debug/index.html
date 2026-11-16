@@ -27,7 +27,7 @@
   <h1>MoeKoe-Music-SearchTips 调试台</h1>
   <div class="layout">
     <div class="left">
-      <h2>模拟 MoeKoe Music 页面（直连 / 中继两种模式自动切换）</h2>
+      <h2>模拟 MoeKoe Music 页面（直连 / 中继 / 主世界桥接三种模式自动切换）</h2>
       <iframe id="pageFrame" src="page-sim.html?role=page"></iframe>
     </div>
     <div class="right">
@@ -66,6 +66,10 @@
       const k = kernel();
       if (k && k.logs.length) k.logs.splice(0).forEach(m => log('      [通道] ' + m));
     }
+    function kernelLogHas(substr) {
+      const k = kernel();
+      return k ? k.logs.some(m => String(m).indexOf(substr) !== -1) : false;
+    }
 
     function reloadFrame(f) {
       return new Promise(res => {
@@ -75,7 +79,12 @@
     }
 
     function setPageMode(mode) {
-      const url = mode === 'relay' ? 'page-sim.html?role=page&storage=off' : 'page-sim.html?role=page';
+      const urls = {
+        relay: 'page-sim.html?role=page&storage=off&kugouapi=off',
+        bridge: 'page-sim.html?role=page&mwapi=1',
+        direct: 'page-sim.html?role=page'
+      };
+      const url = urls[mode] || urls.direct;
       return new Promise(res => {
         pageFrame.addEventListener('load', res, { once: true });
         pageFrame.src = url;
@@ -115,7 +124,12 @@
 
     async function runSuite(mode) {
       log('');
-      log('===== 测试模式：' + (mode === 'relay' ? '中继模式（chrome.storage 不可用，模拟实测受限环境）' : '直连模式（chrome.storage 可用，模拟开发者环境）') + ' =====');
+      const MODE_LABELS = {
+        direct: '直连模式（chrome.storage / kugouapi 可见，content 直接调用）',
+        bridge: '主世界桥接模式（chrome.storage 可用、kugouapi 仅主世界可见，模拟真实 1.7.2 环境）',
+        relay: '中继模式（chrome.storage / kugouapi 均不可见，模拟受限环境）'
+      };
+      log('===== 测试模式：' + (MODE_LABELS[mode] || mode) + ' =====');
 
       // 清空 storage 后以对应模式重载页面与 popup
       const k = kernel();
@@ -138,6 +152,19 @@
       assert(!!kernel().storageData[STORAGE_KEY], '[' + mode + '] 首启后 chrome.storage 已持久化默认配置');
       await doSearch('默认配置');
       assert(countItems() === 10, '[' + mode + '] 默认配置搜索显示 10 条建议（实际 ' + countItems() + '）');
+
+      // Test A2: 建议接口通道验证（直连 / 主世界桥接 / relay 代理）
+      log('--- Test A2: 建议接口请求通道 ---');
+      if (mode === 'relay') {
+        assert(kernelLogHas('[kugouapi:relay]') && !kernelLogHas('[kugouapi:page]') && !kernelLogHas('[kugouapi:main]'),
+          '[' + mode + '] 隔离世界经 relay 代理调用 kugouapi（无直连/桥接请求）');
+      } else if (mode === 'bridge') {
+        assert(kernelLogHas('[kugouapi:main]') && !kernelLogHas('[kugouapi:page]') && !kernelLogHas('[kugouapi:relay]'),
+          '[' + mode + '] 隔离世界经主世界桥接调用 kugouapi（无直连/relay 请求）');
+      } else {
+        assert(kernelLogHas('[kugouapi:page]') && !kernelLogHas('[kugouapi:relay]') && !kernelLogHas('[kugouapi:main]'),
+          '[' + mode + '] 页面主世界直接调用 kugouapi（无桥接/relay 请求）');
+      }
       dumpChannelLogs();
 
       // Test B: 保存 maxResults=15，验证实时生效（无需刷新）
@@ -222,6 +249,7 @@
       log('===== 测试开始 =====');
       await runSuite('direct');
       await runSuite('relay');
+      await runSuite('bridge');
       log('');
       log('===== 测试结束：' + passCount + ' 通过, ' + failCount + ' 失败 =====');
       document.title = 'TESTS-' + passCount + 'PASS-' + failCount + 'FAIL';
